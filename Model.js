@@ -188,6 +188,9 @@ function jobDetail(job, status) {
     bits.push(formatBytes(job.doneBytes) + " of " + formatBytes(job.totalBytes))
     return bits.join(" · ")
   }
+  // A whole-job error (an unwritable destination, a full disk) is the thing
+  // the user has to act on, so it outranks the per-file failure count.
+  if (job && job.error) return String(job.error)
   if (job && job.status === "failed" && Array.isArray(job.failures) && job.failures.length)
     return job.failures.length + " file(s) failed — open the panel to retry"
   if (!status || !status.connected) return ""

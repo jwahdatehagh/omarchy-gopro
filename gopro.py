@@ -48,6 +48,11 @@ PHOTO_EXT = {".jpg", ".jpeg", ".gpr", ".raw"}
 # 8 MB/s legitimately takes eight minutes and must not be killed for it.
 READ_TIMEOUT = 60
 RETRIES = 3
+# Local filesystem problems that retrying cannot fix. Grinding through 47
+# files to report the same permission error 47 times helps nobody, so these
+# abort the whole job at the first occurrence.
+FATAL_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC,
+                errno.EDQUOT, errno.ENOENT}
 # Re-read the manifest this often mid-sync. The card can be swapped or
 # formatted underneath a running job; that has really happened.
 MANIFEST_RECHECK_SEC = 120
@@ -172,6 +177,16 @@ def http_ok(ip, path, timeout=15):
 
 
 # -------------------------------------------------------------------- manifest
+
+def human_bytes(value):
+    value = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1000 or unit == "TB":
+            return "{:.0f} {}".format(value, unit) if unit == "B" or value >= 100 \
+                else "{:.1f} {}".format(value, unit)
+        value /= 1000
+    return "{:.1f} TB".format(value)
+
 
 def media_kind(name):
     ext = os.path.splitext(str(name))[1].lower()
@@ -345,6 +360,31 @@ class Progress:
 
 # ------------------------------------------------------------------------ sync
 
+def check_destination(dest_root):
+    """Can we actually write here? Returns (ok, reason)."""
+    path = Path(dest_root)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return False, "Cannot create {}: {}.".format(path, e.strerror or e)
+    if not os.access(path, os.W_OK | os.X_OK):
+        return False, "Cannot write to {}: permission denied.".format(path)
+    probe = path / ".omarchy-gopro-write-test"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as e:
+        return False, "Cannot write to {}: {}.".format(path, e.strerror or e)
+    return True, ""
+
+
+def free_space(dest_root):
+    try:
+        return shutil.disk_usage(str(dest_root)).free
+    except OSError:
+        return None
+
+
 def _acquire_lock():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     fh = LOCK_PATH.open("w")
@@ -408,6 +448,17 @@ def run_sync(days=None, names=None, dest_root=DEFAULT_DEST, everything=False):
         return 1
 
     ip = cam["ip"]
+
+    # The destination is a precondition, not a per-file concern: an
+    # unwritable path or an unmounted drive should fail once, clearly,
+    # before a single byte moves.
+    ok, reason = check_destination(dest_root)
+    if not ok:
+        write_job({"schema": 1, "status": "failed", "error": reason,
+                   "dest": str(dest_root), "updatedAt": time.time()})
+        print(reason, file=sys.stderr)
+        return 1
+
     rows = local_state(fetch_manifest(ip), dest_root)
     fp = fingerprint(rows)
 
@@ -457,6 +508,13 @@ def run_sync(days=None, names=None, dest_root=DEFAULT_DEST, everything=False):
         job["rateBps"] = prog.rate()
         job["etaSec"] = prog.eta(extra)
         write_job(job)
+
+    free = free_space(dest_root)
+    if free is not None and free < prog.total_bytes:
+        job["warnings"].append(
+            "This needs {} but only {} is free on the destination. The copy "
+            "will stop when the disk fills.".format(
+                human_bytes(prog.total_bytes), human_bytes(free)))
 
     flush()
     if not queue:
@@ -531,6 +589,19 @@ def run_sync(days=None, names=None, dest_root=DEFAULT_DEST, everything=False):
                     if attempt == RETRIES:
                         job["failures"].append({"name": row["name"],
                                                 "reason": "HTTP %s" % e.code})
+                    else:
+                        time.sleep(2 * attempt)
+                except OSError as e:
+                    if getattr(e, "errno", None) in FATAL_ERRNOS:
+                        job["status"] = "failed"
+                        job["error"] = "Cannot write to {}: {}.".format(
+                            dest_root, e.strerror or e)
+                        job["currentFile"] = ""
+                        flush()
+                        print(job["error"], file=sys.stderr)
+                        return 1
+                    if attempt == RETRIES:
+                        job["failures"].append({"name": row["name"], "reason": str(e)})
                     else:
                         time.sleep(2 * attempt)
                 except Exception as e:

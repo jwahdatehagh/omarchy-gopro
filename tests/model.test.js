@@ -176,3 +176,20 @@ test("day thumbnails are the newest few of that day", () => {
   assert.equal(Model.dayThumbs(null, "2026-09-08", 4).length, 0)
   assert.equal(Model.dayThumbs(files, "", 4).length, 0)
 })
+
+test("a whole-job error outranks the per-file failure count", () => {
+  // An unwritable destination fails every file for one reason; the reason is
+  // what the user can act on, not the tally.
+  const job = {
+    status: "failed",
+    error: "Cannot write to /mnt/backup: permission denied.",
+    failures: [{ name: "a.MP4", reason: "x" }, { name: "b.MP4", reason: "x" }]
+  }
+  assert.equal(Model.jobDetail(job, Model.defaultStatus()),
+               "Cannot write to /mnt/backup: permission denied.")
+  assert.equal(Model.jobHeadline(job, Model.defaultStatus()), "Sync incomplete")
+
+  // Without a job-level error, the count still shows.
+  const perFile = { status: "failed", failures: [{ name: "a.MP4", reason: "HTTP 500" }] }
+  assert.match(Model.jobDetail(perFile, Model.defaultStatus()), /1 file\(s\) failed/)
+})

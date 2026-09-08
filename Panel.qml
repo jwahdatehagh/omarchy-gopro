@@ -408,9 +408,15 @@ Panel {
           // are silent unless something says so.
           Text {
             textFormat: Text.PlainText
-            visible: gopro.job && Array.isArray(gopro.job.warnings) && gopro.job.warnings.length > 0
+            visible: text !== ""
             width: parent.width
-            text: gopro.job && gopro.job.warnings ? gopro.job.warnings.join(" ") : ""
+            text: {
+              if (!gopro.job) return ""
+              var bits = []
+              if (gopro.job.error) bits.push(String(gopro.job.error))
+              if (Array.isArray(gopro.job.warnings)) bits = bits.concat(gopro.job.warnings)
+              return bits.join(" ")
+            }
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
