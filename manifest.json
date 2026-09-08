@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Jalil Wahdatehagh",
   "license": "MIT",
-  "description": "Copy photos and video off a USB-connected GoPro from the Omarchy bar: day-by-day browsing with thumbnails, verified background transfers, and card cleanup once everything is safely on disk.",
+  "description": "Copy photos and video off a USB-connected GoPro from the Omarchy bar. Browse the card by day with thumbnails, copy in the background with progress and an ETA, and clear the card once every file is verified on disk.",
   "kinds": [
     "bar-widget"
   ],
@@ -31,7 +31,7 @@
         "key": "destination",
         "type": "path",
         "label": "Where to copy media",
-        "description": "Day folders (YYYY-MM-DD) are created inside this directory. Leave empty for ~/Pictures/GoPro.",
+        "description": "The plugin creates day folders (YYYY-MM-DD) inside it. Leave empty for ~/Pictures/GoPro.",
         "defaultValue": ""
       },
       {
@@ -44,7 +44,7 @@
         "key": "notifyOnConnect",
         "type": "boolean",
         "label": "Notify when a camera is plugged in",
-        "description": "Says how much is waiting to be copied. Nothing is transferred until you ask.",
+        "description": "Says how much is waiting. It copies nothing until you ask.",
         "defaultValue": true
       },
       {

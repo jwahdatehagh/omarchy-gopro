@@ -124,7 +124,8 @@ Item {
     var pending = Number(totals.pendingFiles || 0)
     var body = pending > 0
       ? pending + " file(s), " + Model.formatBytes(totals.pendingBytes)
-        + " — about " + Model.estimateDuration(totals.pendingBytes) + " to copy"
+        + ", about " + Model.estimateDuration(totals.pendingBytes, parsed.lastRateBps)
+        + " to copy"
       : "Everything on the card is already on disk."
     notify((parsed.model || "GoPro") + " connected", body, "normal")
   }

@@ -7,43 +7,43 @@ the Omarchy bar.
 
 ## Why this exists
 
-A GoPro whose `Preferences → Connections → USB Connection` is set to **GoPro
-Connect** does not appear as a storage device. It enumerates as a USB
-CDC-Ethernet adapter, so no file manager on any OS will show it and
-`mtp-detect` finds nothing. The camera is charging and apparently fine, and
-its files are unreachable.
+A GoPro whose `Preferences → Connections → USB Connection` is set to GoPro
+Connect does not appear as a storage device. It enumerates as a USB
+CDC-Ethernet adapter, so no file manager on any OS will show it, and
+`mtp-detect` finds nothing. The camera charges, the light comes on,
+everything looks fine, and the files are unreachable.
 
 What it does do in that mode is run an HTTP server. This plugin drives it.
 
-MTP mode makes the camera mount normally in a file manager, but it turns this
-HTTP API off. The two are mutually exclusive — pick one.
+MTP mode mounts the camera normally in a file manager, but it switches the
+HTTP API off. You get one or the other, so pick.
 
 ## What it does
 
-- Lists the card by day, with thumbnails pulled from the camera's own proxies.
-- Copies to `~/Pictures/GoPro/YYYY-MM-DD/`, original filenames kept, photos
-  and video together. Day folders come from each file's creation time in
-  local time.
+- Lists the card by day, with thumbnails from the camera's own proxies.
+- Copies to `~/Pictures/GoPro/YYYY-MM-DD/`, keeping original filenames, photos
+  and video together. The day comes from each file's creation time in local
+  time.
 - Runs transfers detached, so a multi-hour copy survives the panel closing,
-  the bar reloading, and the shell restarting.
+  the bar reloading and the shell restarting.
 - Reports live progress and an ETA computed from bytes, with per-day and
   whole-card progress bars.
-- Removes files from the camera, or erases the card, once — and only once —
-  every file is verified byte-for-byte on disk.
+- Deletes from the camera only after it has verified that same file
+  byte-for-byte on disk.
 
-Nothing is copied or deleted until you ask. Plugging a camera in gets you a
-notification saying how much is waiting, and nothing else.
+Nothing is copied or deleted until you ask. Plugging a camera in gets you one
+notification saying how much is waiting.
 
 ## Requirements
 
 - Omarchy 4 (`omarchy-shell`, Quickshell)
-- `python3` — standard library only, no pip packages
+- `python3`, standard library only, no pip packages
 - `notify-send` (`libnotify`) for the connect and completion notifications
-- `xdg-open` for the "open folder" buttons
+- `xdg-open` for the open-folder buttons
 
 All four ship with a standard Omarchy install. The plugin bundles no binaries
-and downloads nothing at install or run time; it talks only to the camera on
-its link-local USB address.
+and downloads nothing at install or run time. It talks to exactly one host,
+the camera, on its link-local USB address.
 
 ## Install
 
@@ -60,26 +60,26 @@ Plugins land disabled so you can read the code first.
 omarchy plugin remove digital.1001.gopro
 ```
 
-That deletes the plugin checkout and drops its widget from the bar. It leaves
-your copied media alone. To remove everything else the plugin wrote:
+That deletes the plugin checkout and drops its widget from the bar. To clear
+what else it wrote:
 
 ```bash
 rm -rf ~/.local/state/omarchy-gopro   # transfer job state and log
 rm -rf ~/.cache/omarchy-gopro         # cached thumbnails
 ```
 
-Your archive in `~/Pictures/GoPro/` is never touched by removal — delete it
+Removal never touches your archive in `~/Pictures/GoPro/`. Delete that
 yourself if you want it gone.
 
 ## What it touches
 
-- Writes media to the destination directory, `~/Pictures/GoPro/` by default.
-- Writes job state to `~/.local/state/omarchy-gopro/` and thumbnails to
+- Media goes to the destination directory, `~/Pictures/GoPro/` by default.
+- Job state goes to `~/.local/state/omarchy-gopro/`, thumbnails to
   `~/.cache/omarchy-gopro/`.
-- Its settings live in `~/.config/omarchy/shell.json` alongside every other
-  widget's, written by Omarchy rather than by the plugin.
+- Its settings sit in `~/.config/omarchy/shell.json` with every other
+  widget's. Omarchy writes that file, not the plugin.
 
-It edits no other configuration, needs no root, and installs no services.
+It edits no other configuration, needs no root and installs no services.
 
 ## Using it
 
@@ -99,7 +99,7 @@ Per-day buttons copy, open the folder, or remove that day from the camera.
 
 ## From the terminal
 
-`gopro.py` is the whole implementation and works standalone:
+`gopro.py` is the whole implementation and runs standalone:
 
 ```bash
 ./gopro.py detect                 # is a camera reachable, and at what address
@@ -108,64 +108,66 @@ Per-day buttons copy, open the folder, or remove that day from the camera.
 ./gopro.py sync --day 2026-09-08  # one day
 ./gopro.py job                    # live progress
 ./gopro.py cancel
-./gopro.py verify                 # archive vs manifest — the source of truth
+./gopro.py verify                 # compares the archive against the manifest
 ./gopro.py delete --day 2026-09-08 --dry-run
 ./gopro.py format --dry-run
 ```
 
-Destructive commands print what they would do and change nothing unless given
+Destructive commands print what they would do and change nothing without
 `--yes`.
 
 ## IPC
 
 ```bash
 omarchy-shell gopro open|close|toggle|refresh|sync|cancel|status
-omarchy-shell gopro erase          # opens the confirmation; never erases by itself
+omarchy-shell gopro erase          # opens the confirmation, never erases by itself
 ```
 
-## How it addresses the camera
+## Finding the camera
 
-The camera derives its wired address from its serial number: `172.2X.1YZ.51`,
-where `X`, `Y` and `Z` are the last three digits. Serial `…294` puts the
-camera on `172.22.194.51`. The plugin reads the serial from the USB
-descriptor rather than hardcoding an address, and falls back to scanning the
-CDC-Ethernet interface's subnet. Do not assume the host sits on `.55` — it is
-DHCP-assigned and moves.
+The camera derives its wired address from its serial number. The pattern is
+`172.2X.1YZ.51`, where `X`, `Y` and `Z` are the last three digits. Serial
+`…294` puts the camera on `172.22.194.51`. The plugin reads the serial from
+the USB descriptor instead of hardcoding an address, and falls back to
+scanning the CDC-Ethernet interface's subnet. Do not assume the host sits on
+`.55`. DHCP moves it.
 
-## Things it is careful about
+## What goes wrong, and what it does about it
 
-Every one of these came from losing something, or nearly losing it:
+Each of these cost something before it became a rule. Four clips vanished off
+the card mid-session before anything had copied them. Two JPGs finished
+truncated and looked complete.
 
 - **A 403 on a download means "no such file", not "the media server is
-  broken".** The plugin re-reads the manifest before drawing any conclusion,
-  and reports the file as having vanished rather than as an error.
-- **The card can change underneath a running transfer.** The manifest is
-  fingerprinted and re-checked every couple of minutes; if it changes mid-job
-  the remaining queue is re-checked against the new one and the panel says so.
-- **Downloads land in `<name>.part` and are renamed only when whole.** An
-  interrupted transfer left under its final name looks complete to any later
-  check and silently corrupts the archive.
-- **A file counts as copied only when it exists and its size matches the
-  manifest exactly.** That single rule makes re-running free, resumable and
-  self-healing.
-- **Nothing is deleted that is not verified on disk first**, and the
-  filesystem-versus-manifest check — not a log file — decides what is
-  verified.
+  broken".** The plugin re-reads the manifest before concluding anything, then
+  reports the file as gone rather than as an error. Reading it the other way
+  once cost a pointless power cycle and a wrong diagnosis.
+- **The card can change underneath a running transfer.** The plugin
+  fingerprints the manifest, re-checks it every couple of minutes, drops
+  files that disappeared from the remaining queue, and says so in the panel.
+- **Downloads land in `<name>.part`.** The rename happens only when the byte
+  count matches. An interrupted transfer left under its final name passes
+  every later existence check, and you find out months later.
+- **A file counts as copied only when it exists at exactly the manifest
+  size.** Re-running then costs nothing, resumes where it stopped, and
+  replaces anything truncated.
+- **The camera keeps nothing the disk has not confirmed.** Comparing the
+  filesystem against the manifest decides that, not the log.
 
-Treat anything still only on the camera as ephemeral.
+Anything that exists only on the camera can disappear without warning. Copy it
+before you rely on it.
 
 ## Speed
 
-Measured on a HERO9: **18.4 MB/s sustained**, verified over a 1.14 GB run
-whose files came back byte-identical to earlier copies of the same clips.
-That is with turbo transfer enabled, which the plugin switches on for the
-duration of a sync and off again afterwards; without it the same link
-sustains about 8.4 MB/s. Budget roughly a minute per gigabyte, so 19 GB takes
-around 17 minutes.
+A HERO9 sustains 18.4 MB/s. That number comes from a 1.14 GB run whose files
+came back byte-identical to earlier copies of the same clips. It is with turbo
+transfer, which the plugin switches on for the length of a sync and off
+afterwards. Without it the same link manages about 8.4 MB/s. Budget a minute
+per gigabyte, so 19 GB takes around 17 minutes.
 
-The camera's link is the bottleneck, not the disk. The first estimate you see
-uses the conservative 8.4 MB/s figure; after one completed transfer the panel
-predicts from the rate that job actually achieved.
+The camera's link is the bottleneck, not the disk. Your first estimate uses
+the pessimistic 8.4 MB/s figure. After one completed transfer the panel
+predicts from the rate that job actually hit.
 
 ## Settings
 
@@ -179,13 +181,13 @@ Setup → Plugins.
 node --test tests/model.test.js
 ```
 
+## Developing
+
+The plugin lives in `~/.config/omarchy/plugins/digital.1001.gopro/`. A real
+directory there hot-reloads when you save. If it is a symlink to a checkout
+elsewhere, the shell's file watcher does not follow it, so run
+`omarchy-restart-shell` after an edit.
+
 ## License
 
 MIT.
-
-## Developing
-
-The plugin lives in `~/.config/omarchy/plugins/digital.1001.gopro/`. If that
-is a symlink to a checkout elsewhere, the shell's file watcher does not follow
-it, so edits need `omarchy-restart-shell` rather than picking themselves up.
-A real directory there hot-reloads on save.

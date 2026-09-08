@@ -194,7 +194,7 @@ function jobDetail(job, status) {
   // the user has to act on, so it outranks the per-file failure count.
   if (job && job.error) return String(job.error)
   if (job && job.status === "failed" && Array.isArray(job.failures) && job.failures.length)
-    return job.failures.length + " file(s) failed — open the panel to retry"
+    return job.failures.length + " file(s) failed. Open the panel to retry."
   if (!status || !status.connected) return ""
   var totals = status.totals || {}
   if (Number(totals.pendingBytes || 0) > 0)
@@ -205,10 +205,10 @@ function jobDetail(job, status) {
   return "The card is empty"
 }
 
-// Cold-start guess only, and deliberately pessimistic: this is the rate a
-// HERO9 sustains over USB CDC-Ethernet without turbo transfer. Overshooting
-// the estimate is the kinder error — a copy that beats its ETA is a pleasant
-// surprise, one that blows through it reads as broken.
+// Cold-start guess only, and pessimistic on purpose. This is the rate a
+// HERO9 sustains over USB CDC-Ethernet without turbo transfer. A copy that
+// beats its ETA is a pleasant surprise. One that blows through it reads as
+// broken, so overshoot.
 var ASSUMED_BYTES_PER_SEC = 8.4 * 1000 * 1000
 
 // Once a job has finished, the rate it actually achieved beats any constant:
