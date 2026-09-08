@@ -141,9 +141,19 @@ test("a nearly full card is flagged", () => {
   assert.equal(Model.cardNearlyFull(Model.parseStatus(JSON.stringify(roomy))), false)
 })
 
-test("cold-sync estimate uses the measured USB ceiling", () => {
-  // 19 GB over a link that really does sustain ~8.4 MB/s.
+test("cold-sync estimate falls back to a pessimistic constant", () => {
+  // 19 GB over a link that sustains ~8.4 MB/s without turbo transfer.
   assert.equal(Model.estimateDuration(18967442195), "38m")
+})
+
+test("estimate calibrates to the rate the last job actually achieved", () => {
+  // The same 19 GB at a measured 18.4 MB/s is barely half as long. Turbo
+  // transfer really does roughly double throughput, so a constant misleads.
+  assert.equal(Model.estimateDuration(18967442195, 18.4e6), "17m")
+  // Nonsense rates fall back rather than dividing by zero.
+  assert.equal(Model.estimateDuration(18967442195, 0), "38m")
+  assert.equal(Model.estimateDuration(18967442195, -5), "38m")
+  assert.equal(Model.estimateDuration(18967442195, null), "38m")
 })
 
 test("day meta describes the contents, status is kept separate", () => {

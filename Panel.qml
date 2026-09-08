@@ -437,7 +437,7 @@ Panel {
               value: Number(root.totals.pendingFiles || 0) === 0
                 ? "Nothing"
                 : root.totals.pendingFiles + " · " + Model.formatBytes(root.totals.pendingBytes)
-                  + " · ~" + Model.estimateDuration(root.totals.pendingBytes)
+                  + " · ~" + Model.estimateDuration(root.totals.pendingBytes, gopro.status.lastRateBps)
             }
             InfoPair {
               label: "Card space"
@@ -506,7 +506,7 @@ Panel {
                 : (Number(root.totals.pendingFiles || 0) === 0
                    ? String(gopro.status.dest || "")
                    : Model.formatBytes(root.totals.pendingBytes) + " · about "
-                     + Model.estimateDuration(root.totals.pendingBytes))
+                     + Model.estimateDuration(root.totals.pendingBytes, gopro.status.lastRateBps))
               enabled: gopro.connected && (gopro.syncing || Number(root.totals.pendingFiles || 0) > 0)
               onTriggered: root.primaryAction()
               onHovered: { root.cursorActive = true; root.focusSection = "primary" }

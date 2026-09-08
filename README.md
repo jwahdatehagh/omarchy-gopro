@@ -156,9 +156,16 @@ Treat anything still only on the camera as ephemeral.
 
 ## Speed
 
-About 8.4 MB/s sustained, which is USB 2.0 CDC-Ethernet; the camera's link is
-the bottleneck, not the disk. Budget roughly two minutes per gigabyte: 19 GB
-takes about 40 minutes.
+Measured on a HERO9: **18.4 MB/s sustained**, verified over a 1.14 GB run
+whose files came back byte-identical to earlier copies of the same clips.
+That is with turbo transfer enabled, which the plugin switches on for the
+duration of a sync and off again afterwards; without it the same link
+sustains about 8.4 MB/s. Budget roughly a minute per gigabyte, so 19 GB takes
+around 17 minutes.
+
+The camera's link is the bottleneck, not the disk. The first estimate you see
+uses the conservative 8.4 MB/s figure; after one completed transfer the panel
+predicts from the rate that job actually achieved.
 
 ## Settings
 

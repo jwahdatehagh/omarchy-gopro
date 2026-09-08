@@ -839,6 +839,13 @@ def do_thumbs(args):
 
 # ---------------------------------------------------------------------- status
 
+def Number_ok(value):
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def do_status(args):
     cam = detect()
     payload = {"camera": cam, "dest": str(args.dest), "job": read_job()}
@@ -865,6 +872,12 @@ def do_status(args):
         payload["error"] = "Could not read the media list: %s" % e
         print(json.dumps(payload))
         return 1
+
+    # The rate the last completed job actually achieved, so the panel can
+    # predict the next one from this camera and link rather than a constant.
+    last = payload.get("job")
+    if last and last.get("status") == "done" and Number_ok(last.get("rateBps")):
+        payload["lastRateBps"] = float(last["rateBps"])
 
     pending = [r for r in rows if not r.get("synced")]
     payload["fingerprint"] = fingerprint(rows)

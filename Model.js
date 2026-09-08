@@ -16,7 +16,8 @@ function defaultStatus() {
     days: [],
     totals: { files: 0, bytes: 0, pendingFiles: 0, pendingBytes: 0, photos: 0, videos: 0 },
     job: null,
-    fingerprint: ""
+    fingerprint: "",
+    lastRateBps: 0
   }
 }
 
@@ -46,6 +47,7 @@ function parseStatus(raw) {
   status.sdRemainingBytes = Number(parsed.sdRemainingBytes || 0)
   status.dest = String(parsed.dest || "")
   status.fingerprint = String(parsed.fingerprint || "")
+  status.lastRateBps = Number(parsed.lastRateBps || 0)
   status.days = Array.isArray(parsed.days) ? parsed.days : []
   status.totals = parsed.totals && typeof parsed.totals === "object" ? parsed.totals : status.totals
   status.job = parsed.job || null
@@ -196,18 +198,25 @@ function jobDetail(job, status) {
   if (!status || !status.connected) return ""
   var totals = status.totals || {}
   if (Number(totals.pendingBytes || 0) > 0)
-    return formatBytes(totals.pendingBytes) + " · about " + estimateDuration(totals.pendingBytes)
+    return formatBytes(totals.pendingBytes) + " · about "
+      + estimateDuration(totals.pendingBytes, status.lastRateBps)
   if (Number(totals.files || 0) > 0)
     return formatBytes(totals.bytes) + " on the card, all copied"
   return "The card is empty"
 }
 
-// USB 2.0 CDC-Ethernet tops out around 8.4 MB/s and the camera, not the disk,
-// is the bottleneck — so a static rate predicts a cold sync well enough.
+// Cold-start guess only, and deliberately pessimistic: this is the rate a
+// HERO9 sustains over USB CDC-Ethernet without turbo transfer. Overshooting
+// the estimate is the kinder error — a copy that beats its ETA is a pleasant
+// surprise, one that blows through it reads as broken.
 var ASSUMED_BYTES_PER_SEC = 8.4 * 1000 * 1000
 
-function estimateDuration(bytes) {
-  return formatDuration(Number(bytes || 0) / ASSUMED_BYTES_PER_SEC)
+// Once a job has finished, the rate it actually achieved beats any constant:
+// throughput varies with turbo transfer, firmware and cable.
+function estimateDuration(bytes, rateBps) {
+  var rate = Number(rateBps)
+  if (!isFinite(rate) || rate <= 0) rate = ASSUMED_BYTES_PER_SEC
+  return formatDuration(Number(bytes || 0) / rate)
 }
 
 function batteryGlyph(percent) {
