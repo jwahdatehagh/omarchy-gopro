@@ -20,4 +20,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m compileall -q gopro.py
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - run: python3 -c "import json; json.load(open('manifest.json'))"

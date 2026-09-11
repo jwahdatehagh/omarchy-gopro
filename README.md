@@ -145,9 +145,10 @@ truncated and looked complete.
 - **The card can change underneath a running transfer.** The plugin
   fingerprints the manifest, re-checks it every couple of minutes, drops
   files that disappeared from the remaining queue, and says so in the panel.
-- **Downloads land in `<name>.part`.** The rename happens only when the byte
-  count matches. An interrupted transfer left under its final name passes
-  every later existence check, and you find out months later.
+- **Downloads land in a random temporary file beside the destination.** The
+  rename happens only when the byte count matches. An interrupted transfer
+  left under its final name passes every later existence check, and you find
+  out months later.
 - **A file counts as copied only when it exists at exactly the manifest
   size.** Re-running then costs nothing, resumes where it stopped, and
   replaces anything truncated.
@@ -156,6 +157,19 @@ truncated and looked complete.
 
 Anything that exists only on the camera can disappear without warning. Copy it
 before you rely on it.
+
+Camera responses have size limits: 1 MiB for state, 16 MiB and 100,000 files
+for a media manifest, and 8 MiB per thumbnail. Transfers stop at the manifest's
+declared size, with a 64 GiB ceiling per media file. Oversized or incomplete
+downloads are discarded. Thumbnail batches stop at 128 files; the cache evicts
+older thumbnails to stay within 256 MiB.
+
+Writes use exclusive random temporary files and atomic replacement. State,
+cache, and archive files must be regular files owned by your user, without
+hard links or group/other write access. Symlinks in files or directory paths
+are rejected; choose a destination's real path if you normally reach it through
+a symlink. Shared writable directories are rejected too (root-owned sticky
+ancestors such as `/tmp` are allowed).
 
 ## Speed
 
@@ -179,6 +193,7 @@ Setup → Plugins.
 
 ```bash
 node --test tests/model.test.js
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 ## Developing

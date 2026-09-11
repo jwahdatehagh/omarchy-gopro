@@ -20,13 +20,16 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -52,10 +55,150 @@ RETRIES = 3
 # files to report the same permission error 47 times helps nobody, so these
 # abort the whole job at the first occurrence.
 FATAL_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC,
-                errno.EDQUOT, errno.ENOENT}
+                errno.EDQUOT, errno.ENOENT, errno.ELOOP, errno.ENOTDIR}
 # Re-read the manifest this often mid-sync. The card can be swapped or
 # formatted underneath a running job; that has really happened.
 MANIFEST_RECHECK_SEC = 120
+
+# Bounds apply even when Content-Length is absent or dishonest.
+MAX_JSON_BYTES = 1 << 20
+MAX_MANIFEST_BYTES = 16 << 20
+MAX_MANIFEST_FILES = 100_000
+MAX_THUMB_BYTES = 8 << 20
+MAX_CACHE_BYTES = 256 << 20
+MAX_MEDIA_BYTES = 64 << 30
+MAX_JOB_BYTES = 16 << 20
+MAX_THUMBS_PER_RUN = 128
+IO_CHUNK = 64 << 10
+
+
+class SizeLimitError(ValueError):
+    pass
+
+
+def _copy_bounded(source, sink, limit):
+    """Read at most limit + 1 bytes; never write the overflow byte."""
+    total = 0
+    while True:
+        chunk = source.read(min(IO_CHUNK, limit - total + 1))
+        if not chunk:
+            return total
+        total += len(chunk)
+        if total > limit:
+            raise SizeLimitError("Response exceeds {} bytes".format(limit))
+        sink(chunk)
+
+
+@contextmanager
+def _directory(path, create=False):
+    """Pin every path component without following directory symlinks."""
+    path = Path(os.path.abspath(path))
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    # In a user namespace the system owner may be mapped to an overflow UID.
+    system_uid = os.fstat(fd).st_uid
+    try:
+        for component in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY |
+                            os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            # Root-owned sticky directories such as /tmp are safe ancestors.
+            sticky_root = info.st_uid == system_uid and info.st_mode & stat.S_ISVTX
+            if info.st_uid not in (system_uid, os.getuid()) or (
+                    info.st_mode & 0o022 and not sticky_root):
+                raise PermissionError(errno.EPERM, "Unsafe directory", str(path))
+        if os.fstat(fd).st_uid != os.getuid():
+            raise PermissionError(errno.EPERM, "Directory is not owned by this user", str(path))
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _check_file(info):
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or info.st_mode & 0o022):
+        raise PermissionError(errno.EPERM, "Expected a private, user-owned regular file")
+
+
+def _check_target(directory, name):
+    try:
+        _check_file(os.stat(name, dir_fd=directory, follow_symlinks=False))
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def _open_file(path, flags=os.O_RDONLY, create=False):
+    path = Path(path)
+    with _directory(path.parent, create=create) as directory:
+        _check_target(directory, path.name)
+        fd = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK |
+                     os.O_CLOEXEC, 0o600, dir_fd=directory)
+        try:
+            _check_file(os.fstat(fd))
+            with os.fdopen(fd, "rb" if flags == os.O_RDONLY else "ab", closefd=False) as fh:
+                yield fh
+        finally:
+            os.close(fd)
+
+
+@contextmanager
+def _atomic_file(path):
+    """Exclusive random temp in a pinned parent; publish only on success."""
+    path = Path(path)
+    with _directory(path.parent, create=True) as directory:
+        _check_target(directory, path.name)
+        name = ".gopro-{}.tmp".format(secrets.token_hex(16))
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+        try:
+            _check_file(os.fstat(fd))
+            with os.fdopen(fd, "wb", closefd=False) as fh:
+                yield fh
+                fh.flush()
+                os.fsync(fd)
+            _check_target(directory, path.name)
+            os.replace(name, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        finally:
+            os.close(fd)
+            try:
+                os.unlink(name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+
+
+def _write_atomic(path, data, limit):
+    if len(data) > limit:
+        raise SizeLimitError("File exceeds {} bytes".format(limit))
+    with _atomic_file(path) as fh:
+        fh.write(data)
+
+
+def _unlink_file(path):
+    with _directory(path.parent, create=True) as directory:
+        _check_target(directory, path.name)
+        try:
+            os.unlink(path.name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def _file_size(path):
+    with _open_file(path) as fh:
+        return os.fstat(fh.fileno()).st_size
+
+
+def _component(value):
+    # Camera names also appear in URL paths and query parameters.
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value):
+        raise ValueError("Invalid camera filename or directory")
+    return value
 
 
 # --------------------------------------------------------------- camera discovery
@@ -154,14 +297,26 @@ def _url(ip, path):
     return "http://{}:{}/{}".format(ip, PORT, path)
 
 
-def http_bytes(ip, path, timeout=READ_TIMEOUT):
+def _check_length(resp, limit):
+    length = resp.headers.get("Content-Length")
+    if length is not None:
+        if not length.isascii() or not length.isdecimal():
+            raise ValueError("Invalid Content-Length")
+        if int(length) > limit:
+            raise SizeLimitError("Response exceeds {} bytes".format(limit))
+
+
+def http_bytes(ip, path, timeout=READ_TIMEOUT, limit=MAX_JSON_BYTES):
     req = urllib.request.Request(_url(ip, path), headers={"Accept": "*/*"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        _check_length(resp, limit)
+        data = bytearray()
+        _copy_bounded(resp, data.extend, limit)
+        return bytes(data)
 
 
-def http_json(ip, path, timeout=15):
-    return json.loads(http_bytes(ip, path, timeout=timeout).decode("utf-8", "replace"))
+def http_json(ip, path, timeout=15, limit=MAX_JSON_BYTES):
+    return json.loads(http_bytes(ip, path, timeout=timeout, limit=limit).decode("utf-8", "replace"))
 
 
 def http_ok(ip, path, timeout=15):
@@ -204,17 +359,22 @@ def fetch_manifest(ip):
     101GOPRO, 102GOPRO and so on once a folder fills; hardcoding 100GOPRO
     silently loses everything past the first thousand files.
     """
-    raw = http_json(ip, "gopro/media/list", timeout=20)
+    raw = http_json(ip, "gopro/media/list", timeout=20, limit=MAX_MANIFEST_BYTES)
     rows = []
     for group in raw.get("media", []):
-        directory = str(group.get("d") or "100GOPRO")
+        directory = _component(str(group.get("d") or "100GOPRO"))
         for entry in group.get("fs", []):
             name = str(entry.get("n") or "")
             if not name:
                 continue
+            _component(name)
             # Every numeric field arrives as a string. Cast or suffer.
             created = int(entry.get("cre") or entry.get("mod") or 0)
             size = int(entry.get("s") or 0)
+            if not 0 <= size <= MAX_MEDIA_BYTES:
+                raise SizeLimitError("Invalid media size for {}".format(name))
+            if len(rows) >= MAX_MANIFEST_FILES:
+                raise SizeLimitError("Too many files in camera manifest")
             rows.append({
                 "name": name,
                 "dir": directory,
@@ -237,7 +397,7 @@ def fingerprint(rows):
 
 
 def dest_for(row, dest_root):
-    return Path(dest_root) / row["day"] / row["name"]
+    return Path(dest_root) / _component(row["day"]) / _component(row["name"])
 
 
 def local_state(rows, dest_root):
@@ -251,7 +411,7 @@ def local_state(rows, dest_root):
     for r in rows:
         target = dest_for(r, dest_root)
         try:
-            actual = target.stat().st_size
+            actual = _file_size(target)
         except OSError:
             r["synced"] = False
             r["localBytes"] = 0
@@ -292,9 +452,15 @@ def group_days(rows):
 
 def read_job():
     try:
-        with JOB_PATH.open() as fh:
-            job = json.load(fh)
+        with _open_file(JOB_PATH) as fh:
+            if os.fstat(fh.fileno()).st_size > MAX_JOB_BYTES:
+                return None
+            data = bytearray()
+            _copy_bounded(fh, data.extend, MAX_JOB_BYTES)
+            job = json.loads(data)
     except (OSError, ValueError):
+        return None
+    if not isinstance(job, dict):
         return None
     # A job whose process died without writing a terminal status would
     # otherwise show as running forever.
@@ -313,11 +479,7 @@ def _pid_alive(pid):
 
 
 def write_job(job):
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = JOB_PATH.with_suffix(".json.tmp")
-    with tmp.open("w") as fh:
-        json.dump(job, fh)
-    os.replace(tmp, JOB_PATH)
+    _write_atomic(JOB_PATH, json.dumps(job).encode(), MAX_JOB_BYTES)
 
 
 class Progress:
@@ -364,15 +526,12 @@ def check_destination(dest_root):
     """Can we actually write here? Returns (ok, reason)."""
     path = Path(dest_root)
     try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return False, "Cannot create {}: {}.".format(path, e.strerror or e)
-    if not os.access(path, os.W_OK | os.X_OK):
-        return False, "Cannot write to {}: permission denied.".format(path)
-    probe = path / ".omarchy-gopro-write-test"
-    try:
-        probe.write_bytes(b"")
-        probe.unlink()
+        with _directory(path, create=True) as directory:
+            name = ".gopro-probe-{}".format(secrets.token_hex(16))
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+            os.close(fd)
+            os.unlink(name, dir_fd=directory)
     except OSError as e:
         return False, "Cannot write to {}: {}.".format(path, e.strerror or e)
     return True, ""
@@ -386,48 +545,57 @@ def free_space(dest_root):
 
 
 def _acquire_lock():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    fh = LOCK_PATH.open("w")
+    with _directory(STATE_DIR, create=True) as directory:
+        _check_target(directory, LOCK_PATH.name)
+        fd = os.open(LOCK_PATH.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW |
+                     os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=directory)
+    try:
+        _check_file(os.fstat(fd))
+        fh = os.fdopen(fd, "a+b")
+    except BaseException:
+        os.close(fd)
+        raise
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        fh.close()
         return None
     return fh
 
 
 def _download(ip, row, target, prog, on_tick, cancelled):
-    """Stream one file to <name>.part and rename only once it is whole.
-
-    An interrupted transfer left in place under its final name looks complete
-    to any later existence check, and silently corrupts the archive.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    part = target.with_name(target.name + ".part")
-    part.unlink(missing_ok=True)
-
+    """Stream within the manifest size, then atomically publish a whole file."""
+    expected = row["sizeBytes"]
+    if not 0 <= expected <= MAX_MEDIA_BYTES:
+        raise SizeLimitError("Invalid media size")
     req = urllib.request.Request(_url(ip, "videos/DCIM/{}".format(row["path"])))
     got = 0
     last_tick = 0.0
-    with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as resp, part.open("wb") as out:
-        while True:
-            if cancelled():
-                part.unlink(missing_ok=True)
-                raise KeyboardInterrupt
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-            got += len(chunk)
-            prog.note(prog.done_bytes + got)
-            now = time.time()
-            if now - last_tick > 1.0:
-                last_tick = now
-                on_tick(got)
+    with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as resp:
+        _check_length(resp, expected)
+        with _atomic_file(target) as out:
+            def write_chunk(chunk):
+                nonlocal got, last_tick
+                out.write(chunk)
+                got += len(chunk)
+                prog.note(prog.done_bytes + got)
+                now = time.time()
+                if now - last_tick > 1.0:
+                    last_tick = now
+                    on_tick(got)
 
-    if got != row["sizeBytes"]:
-        part.unlink(missing_ok=True)
-        raise IOError("size mismatch: got {} bytes, manifest says {}".format(got, row["sizeBytes"]))
-    os.replace(part, target)
+            # Check cancellation before each blocking read, including EOF.
+            class Reader:
+                def read(self, size):
+                    if cancelled():
+                        raise KeyboardInterrupt
+                    return resp.read(size)
+
+            _copy_bounded(Reader(), write_chunk, expected)
+            if cancelled():
+                raise KeyboardInterrupt
+            if got != expected:
+                raise IOError("size mismatch: got {} bytes, manifest says {}".format(got, expected))
     return got
 
 
@@ -436,9 +604,19 @@ def run_sync(days=None, names=None, dest_root=DEFAULT_DEST, everything=False):
     if lock is None:
         print("A sync is already running.", file=sys.stderr)
         return 1
+    with lock:
+        return _run_sync(days, names, dest_root, everything)
 
-    CANCEL_PATH.unlink(missing_ok=True)
-    cancelled = lambda: CANCEL_PATH.exists()
+
+def _run_sync(days, names, dest_root, everything):
+    _unlink_file(CANCEL_PATH)
+
+    def cancelled():
+        try:
+            _file_size(CANCEL_PATH)
+            return True
+        except FileNotFoundError:
+            return False
 
     cam = detect()
     if not cam.get("connected"):
@@ -621,7 +799,7 @@ def run_sync(days=None, names=None, dest_root=DEFAULT_DEST, everything=False):
         flush()
     finally:
         http_ok(ip, "gopro/media/turbo_transfer?p=0", timeout=5)
-        CANCEL_PATH.unlink(missing_ok=True)
+        _unlink_file(CANCEL_PATH)
 
     print("Copied {} of {} files to {}".format(prog.done_files, prog.total_files, dest_root))
     for f in job["failures"]:
@@ -642,10 +820,10 @@ def spawn_sync(args):
         cmd += ["--day", d]
     for n in args.name or []:
         cmd += ["--name", n]
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log = (STATE_DIR / "sync.log").open("a")
-    subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True,
-                     stdin=subprocess.DEVNULL)
+    with _open_file(STATE_DIR / "sync.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                    create=True) as log:
+        subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True,
+                         stdin=subprocess.DEVNULL)
     print(json.dumps({"started": True, "job": str(JOB_PATH)}))
     return 0
 
@@ -770,23 +948,61 @@ def do_format(args):
 
 # ---------------------------------------------------------------------- thumbs
 
+def _thumbnail(ip, camera_path, cache_key):
+    parts = camera_path.split("/")
+    if len(parts) != 2:
+        raise ValueError("Expected camera directory/filename")
+    for part in parts:
+        _component(part)
+    with _open_file(THUMB_DIR / ".cache.lock", os.O_RDWR | os.O_CREAT,
+                    create=True) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _thumbnail_locked(ip, camera_path, cache_key)
+
+
+def _thumbnail_locked(ip, camera_path, cache_key):
+    # Hash arbitrary CLI cache keys so they cannot become filesystem paths.
+    target = THUMB_DIR / (hashlib.sha256(cache_key.encode()).hexdigest() + ".jpg")
+    try:
+        size = _file_size(target)
+        if 0 < size <= MAX_THUMB_BYTES:
+            return target
+    except FileNotFoundError:
+        pass
+    # Bound the whole cache across repeated refreshes and camera swaps.
+    # The cache lock serializes eviction and publication across processes.
+    with _directory(THUMB_DIR) as directory:
+        entries = []
+        for name in os.listdir(directory):
+            if not name.endswith(".jpg"):
+                continue
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            _check_file(info)
+            entries.append((info.st_mtime_ns, name, info.st_size))
+        total = sum(entry[2] for entry in entries)
+        for _, name, size in sorted(entries):
+            if total + MAX_THUMB_BYTES <= MAX_CACHE_BYTES:
+                break
+            os.unlink(name, dir_fd=directory)
+            total -= size
+    req = urllib.request.Request(_url(ip, "gopro/media/thumbnail?path=" + camera_path))
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        _check_length(resp, MAX_THUMB_BYTES)
+        with _atomic_file(target) as out:
+            if not _copy_bounded(resp, out.write, MAX_THUMB_BYTES):
+                raise ValueError("Empty thumbnail")
+    return target
+
+
 def do_thumb(args):
     cam = detect()
     if not cam.get("connected"):
         return 1
-    THUMB_DIR.mkdir(parents=True, exist_ok=True)
-    out = THUMB_DIR / (args.name.replace("/", "_") + ".jpg")
-    if out.exists() and out.stat().st_size > 0:
-        print(str(out))
-        return 0
     try:
-        data = http_bytes(cam["ip"], "gopro/media/thumbnail?path={}".format(args.path), timeout=20)
+        out = _thumbnail(cam["ip"], args.path, args.name)
     except Exception as e:
         print(str(e), file=sys.stderr)
         return 1
-    tmp = out.with_suffix(".jpg.part")
-    tmp.write_bytes(data)
-    os.replace(tmp, out)
     print(str(out))
     return 0
 
@@ -801,8 +1017,6 @@ def do_thumbs(args):
     if not cam.get("connected"):
         print(json.dumps({}))
         return 1
-    THUMB_DIR.mkdir(parents=True, exist_ok=True)
-
     try:
         rows = fetch_manifest(cam["ip"])
     except Exception:
@@ -819,19 +1033,15 @@ def do_thumbs(args):
             continue
         per_day[row["day"]] = seen + 1
         wanted.append(row)
+        if len(wanted) >= MAX_THUMBS_PER_RUN:
+            break
 
     out = {}
     for row in wanted:
-        target = THUMB_DIR / (row["path"].replace("/", "_") + ".jpg")
-        if not (target.exists() and target.stat().st_size > 0):
-            try:
-                data = http_bytes(cam["ip"], "gopro/media/thumbnail?path={}".format(row["path"]),
-                                  timeout=20)
-            except Exception:
-                continue
-            tmp = target.with_suffix(".jpg.part")
-            tmp.write_bytes(data)
-            os.replace(tmp, target)
+        try:
+            target = _thumbnail(cam["ip"], row["path"], row["path"])
+        except Exception:
+            continue
         out[row["path"]] = str(target)
     print(json.dumps(out))
     return 0
@@ -917,8 +1127,7 @@ def do_verify(args):
 
 
 def do_cancel(args):
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    CANCEL_PATH.write_text("1")
+    _write_atomic(CANCEL_PATH, b"1", 1)
     print("Cancel requested.")
     return 0
 
